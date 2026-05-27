@@ -8,6 +8,8 @@ from squidasm.sim.stack.common import LogManager
 from squidasm.sim.stack.program import Program, ProgramContext, ProgramMeta
 from squidasm.util import create_two_node_network
 
+import csv
+
 
 def game_won(x, y, a, b):
     if x == 1 and y == 1:
@@ -116,42 +118,52 @@ class BobProgram(Program):
 
 
 if __name__ == "__main__":
-    # Create a network configuration
-    cfg = create_two_node_network(node_names=["Alice", "Bob"], link_delay=0.0, link_noise=0.0, qdevice_noise=0.0, clink_delay=0.0)
-                                  
 
-    # generate x & y randomly
-    x = numpy.random.randint(0, 2)
-    y = numpy.random.randint(0, 2)
+    NUM_ROUNDS = 200
+    NUM_STEPS  = 11
+    noise_levels = numpy.linspace(0.0, 1.0, NUM_STEPS)
+    win_rates = []
 
-    # Create instances of programs to run
-    alice_program = AliceProgram(x)
-    bob_program = BobProgram(y)
+    print(f"{'Rumore':>8}  {'Vittorie':>10}  {'%':>6}")
+    print("-" * 30)
 
-    # toggle logging. Set to logging.INFO for logging of events.
-    alice_program.logger.setLevel(logging.ERROR)
-    bob_program.logger.setLevel(logging.ERROR)
+    for noise in noise_levels:
+        # Crea la rete con il livello di rumore corrente
+        cfg = create_two_node_network(node_names=["Alice", "Bob"], link_noise=noise, qdevice_noise=noise)
 
-    # Run the simulation. Programs argument is a mapping of network node labels to programs to run on that node
-    alice_result, bob_result = run(
-        config=cfg, programs={"Alice": alice_program, "Bob": bob_program}, num_times=1000
-    )
+        wins = 0
+        for _ in range(NUM_ROUNDS):
+            # generate x & y randomly
+            x = numpy.random.randint(0, 2)
+            y = numpy.random.randint(0, 2)
 
-    #a = alice_result[0]["a"]
-    #b = bob_result[0]["b"]
+            # Create instances of programs to run
+            alice_program = AliceProgram(x)
+            bob_program   = BobProgram(y)
 
-    #print(game_won(x, y, a, b))
+            # toggle logging. Set to logging.INFO for logging of events.
+            alice_program.logger.setLevel(logging.ERROR)
+            bob_program.logger.setLevel(logging.ERROR)
 
-# invece di stampare un solo risultato, si contano tutte le vittorie su 1000 round e si calcola
-# la percentuale di vittorie, che dovrebbe essere intorno all'85.4% per la strategia quantistica 
-# ottimale, 75% per la strategia classica ottimale e 50% per una strategia casuale.
-    wins = 0
-for i in range(1000):
-    a = alice_result[i]["a"]
-    b = bob_result[i]["b"]
-    x = alice_result[i]["x"]
-    y = bob_result[i]["y"]
-    if "won" in game_won(x, y, a, b):
-        wins += 1
+            # Run the simulation. Programs argument is a mapping of network node labels to programs to run on that node
+            alice_result, bob_result = run(
+                config=cfg, programs={"Alice": alice_program, "Bob": bob_program}, num_times=100,
+            )
 
-print(f"Vittorie: {wins}/1000 ({wins/10:.1f}%)")
+            a = alice_result[0]["a"]
+            b = bob_result[0]["b"]
+            if "won" in game_won(x, y, a, b):
+                wins += 1
+
+        rate = wins / NUM_ROUNDS * 100
+        win_rates.append(rate)
+        print(f"{noise:>8.1f}  {wins:>5}/{NUM_ROUNDS}  {rate:>5.1f}%")
+
+    #crea file dati
+    with open("risultati.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["noise", "win_rate"])
+        for noise, rate in zip(noise_levels, win_rates):
+            writer.writerow([noise, rate])
+
+    print("Risultati salvati in risultati.csv")
