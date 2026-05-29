@@ -123,6 +123,7 @@ if __name__ == "__main__":
     NUM_STEPS  = 11
     noise_levels = numpy.linspace(0.0, 1.0, NUM_STEPS)
     win_rates = []
+    margins = []
 
     print(f"{'Rumore':>8}  {'Vittorie':>10}  {'%':>6}")
     print("-" * 30)
@@ -147,7 +148,7 @@ if __name__ == "__main__":
 
             # Run the simulation. Programs argument is a mapping of network node labels to programs to run on that node
             alice_result, bob_result = run(
-                config=cfg, programs={"Alice": alice_program, "Bob": bob_program}, num_times=100,
+                config=cfg, programs={"Alice": alice_program, "Bob": bob_program}, num_times=1,
             )
 
             a = alice_result[0]["a"]
@@ -155,15 +156,26 @@ if __name__ == "__main__":
             if "won" in game_won(x, y, a, b):
                 wins += 1
 
-        rate = wins / NUM_ROUNDS * 100
+        #rate = wins / NUM_ROUNDS * 100
+        #win_rates.append(rate)
+        #print(f"{noise:>8.1f}  {wins:>5}/{NUM_ROUNDS}  {rate:>5.1f}%")
+
+        #calcolo intervallo di confidenza al 95%
+        p=wins/NUM_ROUNDS
+        margin=1.96 * numpy.sqrt(p*(1-p)/NUM_ROUNDS)
+
+        rate = p * 100
+        margin_pct = margin * 100
+
         win_rates.append(rate)
-        print(f"{noise:>8.1f}  {wins:>5}/{NUM_ROUNDS}  {rate:>5.1f}%")
+        margins.append(margin_pct)
+        print(f"{noise:>8.1f}  {wins:>5}/{NUM_ROUNDS}  {rate:>5.1f}% ± {margin_pct:.1f}%")
 
     #crea file dati
     with open("risultati.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["noise", "win_rate"])
-        for noise, rate in zip(noise_levels, win_rates):
-            writer.writerow([noise, rate])
+        writer.writerow(["noise", "win_rate", "margin"])
+        for noise, rate, margin in zip(noise_levels, win_rates, margins):
+            writer.writerow([noise, rate, margin])
 
     print("Risultati salvati in risultati.csv")
