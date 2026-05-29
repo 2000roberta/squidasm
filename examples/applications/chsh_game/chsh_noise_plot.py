@@ -17,15 +17,26 @@ plt.figure(figsize=(8, 5))
 #curva principale
 #plt.plot(df["noise"], df["win_rate"], marker="o", color="steelblue", label="Win rate simulato")
 
-# barre di errore al 95%
+# link noise con barre di errore al 95%
 plt.errorbar(
     df["noise"],          # asse X
-    df["win_rate"],       # asse Y
-    yerr=df["margin"],    # dimensione delle barre di errore
+    df["win_rate_link"],       # asse Y
+    yerr=df["margin_link"],    # dimensione delle barre di errore
     marker="o",           # pallino su ogni punto
     color="steelblue",
     capsize=5,            # la lineetta orizzontale in cima e in fondo alla barra
-    label="Win rate simulato (±95% CI)"
+    label="Link noise (con margine di errore al 95%)"
+)
+
+# qdevice noise con barre di errore al 95%
+plt.errorbar(
+    df["noise"],          # asse X
+    df["win_rate_qdevice"],       # asse Y
+    yerr=df["margin_qdevice"],    # dimensione delle barre di errore
+    marker="s",           # pallino su ogni punto
+    color="darkorange",
+    capsize=5,            # la lineetta orizzontale in cima e in fondo alla barra
+    label="QDevice noise (con margine di errore al 95%)"
 )
 
 plt.axhline(y=85.36, color="green",  linestyle="--", label="Limite quantistico (85.4%)")
@@ -33,11 +44,11 @@ plt.axhline(y=75.0,  color="orange", linestyle="--", label="Limite classico (75%
 plt.axhline(y=50.0,  color="red",    linestyle="--", label="Casuale (50%)")
 plt.xlabel("Livello di rumore (0 = perfetto, 1 = massimo)")
 plt.ylabel("Percentuale di vittorie (%)")
-plt.title("CHSH game: prestazioni vs rumore")
+plt.title("CHSH game: link noise vs qdevice noise")
 plt.ylim(40, 100)
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig("chsh_noise_sweep.png", dpi=150)
+plt.savefig("chsh_noise_confronto.png", dpi=150)
 plt.show()
-print("Grafico salvato come chsh_noise_sweep.png")
+print("Grafico salvato come chsh_noise_confronto.png")
