@@ -2,7 +2,7 @@ import pandas
 import matplotlib.pyplot as plt
 
 # Leggi il CSV con pandas — una riga invece di un loop!
-df = pandas.read_csv("risultati.csv")
+df = pandas.read_csv("risultati_intervallo.csv")
 
 # Stampa la tabella nel terminale (utile per verificare i dati)
 print(df)
@@ -45,10 +45,10 @@ plt.axhline(y=50.0,  color="red",    linestyle="--", label="Casuale (50%)")
 plt.xlabel("Livello di rumore (0 = perfetto, 1 = massimo)")
 plt.ylabel("Percentuale di vittorie (%)")
 plt.title("CHSH game: link noise vs qdevice noise")
-plt.ylim(40, 100)
+plt.ylim(60, 100)
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig("chsh_noise_confronto.png", dpi=150)
+plt.savefig("chsh_noise_intervallo_confronto.png", dpi=150)
 plt.show()
-print("Grafico salvato come chsh_noise_confronto.png")
+print("Grafico salvato come chsh_noise_intervallo_confronto.png")

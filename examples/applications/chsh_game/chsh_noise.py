@@ -121,7 +121,7 @@ if __name__ == "__main__":
 
     NUM_ROUNDS = 200
     NUM_STEPS  = 11
-    noise_levels = numpy.linspace(0.0, 1.0, NUM_STEPS)
+    noise_levels = numpy.linspace(0.0, 0.4, NUM_STEPS)
     win_rates_link    = []
     win_rates_device  = []
     margins_link      = []
@@ -173,7 +173,7 @@ if __name__ == "__main__":
 
         win_rates_link.append(rate)
         margins_link.append(margin_pct)
-        print(f"{noise:>8.1f}  {wins:>5}/{NUM_ROUNDS}  {rate:>5.1f}% ± {margin_pct:.1f}%")
+        print(f"{noise:>8.2f}  {wins:>5}/{NUM_ROUNDS}  {rate:>5.1f}% ± {margin_pct:.1f}%")
 
     print("=== SWEEP QDEVICE NOISE ===")
     print(f"{'Rumore':>8}  {'Vittorie':>10}  {'%':>6}")
@@ -221,11 +221,11 @@ if __name__ == "__main__":
 
         win_rates_device.append(rate)
         margins_device.append(margin_pct)
-        print(f"{noise:>8.1f}  {wins:>5}/{NUM_ROUNDS}  {rate:>5.1f}% ± {margin_pct:.1f}%")
+        print(f"{noise:>8.2f}  {wins:>5}/{NUM_ROUNDS}  {rate:>5.1f}% ± {margin_pct:.1f}%")
 
 
     #crea file dati
-    with open("risultati.csv", "w", newline="") as f:
+    with open("risultati_intervallo.csv", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["noise", "win_rate_link", "margin_link", "win_rate_qdevice", "margin_qdevice"])
         for i in range(len(noise_levels)):
@@ -237,4 +237,4 @@ if __name__ == "__main__":
                 margins_device[i]
             ])
 
-    print("Risultati salvati in risultati.csv")
+    print("Risultati salvati in risultati_intervallo.csv")
