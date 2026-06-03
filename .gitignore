@@ -18,3 +18,7 @@ htmlcov/
 .venv
 venv
 examples/applications/chsh_game/risultati.csv
+examples/applications/chsh_game/chsh_noise_togheter_plot.py
+examples/applications/chsh_game/risultati_intervallo.csv
+examples/applications/chsh_game/risultati_togheter.csv
+examples/applications/chsh_game/chsh_noise_togheter_plot.py
