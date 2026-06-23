@@ -1,54 +1,55 @@
 import pandas
 import matplotlib.pyplot as plt
 
-# Leggi il CSV con pandas — una riga invece di un loop!
-df = pandas.read_csv("risultati_intervallo.csv")
+# Read CSV
+df = pandas.read_csv("risultati_nv_heralded.csv")
 
-# Stampa la tabella nel terminale (utile per verificare i dati)
 print(df)
-
-# Statistiche di base — pandas le calcola automaticamente
-print("\nStatistiche:")
+print("\nStatistics:")
 print(df.describe())
 
-# Grafico
-plt.figure(figsize=(8, 5))
+# Three panels sharing x axis
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 12), sharex=True)
 
-#curva principale
-#plt.plot(df["noise"], df["win_rate"], marker="o", color="steelblue", label="Win rate simulato")
-
-# link noise con barre di errore al 95%
-plt.errorbar(
-    df["noise"],          # asse X
-    df["win_rate_link"],       # asse Y
-    yerr=df["margin_link"],    # dimensione delle barre di errore
-    marker="o",           # pallino su ogni punto
-    color="steelblue",
-    capsize=5,            # la lineetta orizzontale in cima e in fondo alla barra
-    label="Link noise (con margine di errore al 95%)"
+# ── TOP PANEL: Win rate ───────────────────────────────────────────────────────
+ax1.errorbar(
+    df["distance_km"], df["win_rate"],
+    yerr=df["margin"],
+    marker="o", color="steelblue", capsize=5,
+    label="Win rate (±95% CI)"
 )
+ax1.axhline(y=85.36, color="green",  linestyle="--", label="Quantum limit (85.4%)")
+ax1.axhline(y=75.0,  color="orange", linestyle="--", label="Classical limit (75%)")
+ax1.set_ylabel("Win rate (%)")
+ax1.set_title("CHSH game: NV center + heralded link")
+ax1.set_ylim(60, 90)
+ax1.legend(fontsize=8)
+ax1.grid(True)
 
-# qdevice noise con barre di errore al 95%
-plt.errorbar(
-    df["noise"],          # asse X
-    df["win_rate_qdevice"],       # asse Y
-    yerr=df["margin_qdevice"],    # dimensione delle barre di errore
-    marker="s",           # pallino su ogni punto
-    color="darkorange",
-    capsize=5,            # la lineetta orizzontale in cima e in fondo alla barra
-    label="QDevice noise (con margine di errore al 95%)"
+# ── MIDDLE PANEL: Fidelity ────────────────────────────────────────────────────
+ax2.plot(
+    df["distance_km"], df["fidelity"],
+    marker="o", color="darkorange",
+    label="EPR pair fidelity"
 )
+#ax2.axhline(y=1.0,  color="green", linestyle="--", label="Perfect fidelity (1.0)")
+ax2.set_ylabel("EPR pair fidelity")
+ax2.set_ylim(0.9015, 0.9035)
+ax2.legend(fontsize=8)
+ax2.grid(True)
 
-plt.axhline(y=85.36, color="green",  linestyle="--", label="Limite quantistico (85.4%)")
-plt.axhline(y=75.0,  color="orange", linestyle="--", label="Limite classico (75%)")
-plt.axhline(y=50.0,  color="red",    linestyle="--", label="Casuale (50%)")
-plt.xlabel("Livello di rumore (0 = perfetto, 1 = massimo)")
-plt.ylabel("Percentuale di vittorie (%)")
-plt.title("CHSH game: link noise vs qdevice noise")
-plt.ylim(60, 100)
-plt.legend()
-plt.grid(True)
+# ── BOTTOM PANEL: Latency ─────────────────────────────────────────────────────
+ax3.plot(
+    df["distance_km"], df["latency_ms"],
+    marker="o", color="purple",
+    label="Latency"
+)
+ax3.set_xlabel("Distance (km)")
+ax3.set_ylabel("Latency (ms)")
+ax3.set_yscale("log")  # scala logaritmica perché cresce esponenzialmente
+ax3.legend(fontsize=8)
+ax3.grid(True, which="both")  # griglia anche per le linee minori in scala log
+
 plt.tight_layout()
-plt.savefig("chsh_noise_intervallo_confronto.png", dpi=150)
-plt.show()
-print("Grafico salvato come chsh_noise_intervallo_confronto.png")
+plt.savefig("chsh_nv_heralded.png", dpi=150)
+print("Plot saved as chsh_nv_heralded.png")
