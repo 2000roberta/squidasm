@@ -24,3 +24,4 @@ examples/applications/chsh_game/risultati_togheter.csv
 examples/applications/chsh_game/chsh_noise_togheter_plot.py
 examples/applications/chsh_game/risultati_fidelity.csv
 squidasm/util/.sim.py.swp
+examples/applications/chsh_game/risultati_nv_heralded.csv
