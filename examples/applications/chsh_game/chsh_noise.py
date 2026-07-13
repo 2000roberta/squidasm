@@ -234,8 +234,8 @@ if __name__ == "__main__":
     
 
     #STEP 2: NV DEVICE + HERALDED LINK
-    NUM_ROUNDS = 500
-    NUM_STEPS = 50
+    NUM_ROUNDS = 200
+    NUM_STEPS = 11
     distances_km = numpy.linspace(1.0, 100.0, NUM_STEPS) #from 1 to 100 km
 
     win_rates   = []
