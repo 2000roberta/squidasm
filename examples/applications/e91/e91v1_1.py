@@ -19,9 +19,7 @@ from squidasm.run.stack.config import (
 )
 
 # ============================================================
-# E91 - VERSION 2 (revised)
-#
-# Changes relative to the previous draft:
+# E91 - VERSION 2
 #
 # 1. AliceProgram / BobProgram do ONLY quantum operations + basis
 #    exchange. They have no notion of "key" / "test" / "discard" --
@@ -366,6 +364,117 @@ def analyze(
     }
 
 
+# ============================================================
+# V2.5 - RAW KEY EXTRACTION PIPELINE
+#
+# Scope: parameter estimation on a sacrificed random sample, and
+# construction of the final aligned raw key from the remaining bits.
+# Error correction (Cascade) and privacy amplification are explicitly
+# OUT of scope here -- they're V4 territory. What comes out of this
+# pipeline is a "raw key": same length on both sides, parity-aligned,
+# but not yet guaranteed identical (residual QBER) and not yet
+# information-theoretically secret.
+# ============================================================
+
+def extract_key_rounds(alice_result, bob_result, config: ProtocolConfig):
+    """Raw (a_bit, b_bit, basis_pair) triples for KEY_PAIRS rounds only.
+    Nothing is corrected or discarded here -- this is the untouched
+    private data each side has right after the quantum phase."""
+    key_rounds = []
+    for ar, br in zip(alice_result, bob_result):
+        pair = (ar["basis"], br["basis"])
+        if config.classify(*pair) == "key":
+            key_rounds.append((ar["outcome"], br["outcome"], pair))
+    return key_rounds
+
+
+def sample_for_estimation(key_rounds, sample_fraction: float):
+    """Randomly split the raw key rounds into a sacrificed sample (used
+    only to estimate QBER, then discarded) and the remaining rounds
+    that become the actual raw key. Indices are used so this could be
+    done via a public announcement of indices over a classical channel
+    in a real deployment -- here it's just index bookkeeping."""
+    n = len(key_rounds)
+    n_sample = max(1, int(round(n * sample_fraction)))
+    indices = numpy.random.permutation(n)
+    sample_idx = set(indices[:n_sample].tolist())
+
+    sample = [kr for i, kr in enumerate(key_rounds) if i in sample_idx]
+    remaining = [kr for i, kr in enumerate(key_rounds) if i not in sample_idx]
+    return sample, remaining
+
+
+def estimate_qber(sample, expected_relation: Dict[Tuple[int, int], int]):
+    """QBER estimated ONLY from the sacrificed sample -- this is the
+    number a real protocol would actually have available, since the
+    remaining (secret) bits are never compared directly."""
+    n = 0
+    mismatches = 0
+    for a_bit, b_bit, pair in sample:
+        parity = expected_relation.get(pair)
+        if parity is None:
+            continue
+        n += 1
+        if not expected_equal(a_bit, b_bit, parity):
+            mismatches += 1
+
+    if n == 0:
+        return None, None
+    qber = mismatches / n
+    qber_margin = 1.96 * numpy.sqrt(qber * (1 - qber) / n)
+    return qber, qber_margin
+
+
+def build_raw_key(remaining, expected_relation: Dict[Tuple[int, int], int]):
+    """Build the final aligned raw key from the non-sacrificed rounds.
+
+    Bob's bits are realigned to Alice's convention using the calibrated
+    parity -- this is a DELIBERATE, explicit, one-time transformation to
+    produce a usable key, not a silent in-place mutation of the raw
+    per-round data (extract_key_rounds() above still returns the
+    untouched originals). Returns two same-length lists; they are not
+    guaranteed identical (residual QBER is exactly what error
+    correction, out of scope here, would fix).
+    """
+    alice_key, bob_key_aligned = [], []
+    for a_bit, b_bit, pair in remaining:
+        parity = expected_relation.get(pair)
+        if parity is None:
+            continue
+        b_aligned = b_bit if parity == 1 else 1 - b_bit
+        alice_key.append(a_bit)
+        bob_key_aligned.append(b_aligned)
+    return alice_key, bob_key_aligned
+
+
+def run_key_extraction_pipeline(
+    alice_result, bob_result, config: ProtocolConfig,
+    expected_relation: Dict[Tuple[int, int], int],
+    sample_fraction: float = 0.15,
+):
+    key_rounds = extract_key_rounds(alice_result, bob_result, config)
+    sample, remaining = sample_for_estimation(key_rounds, sample_fraction)
+
+    qber_est, qber_est_margin = estimate_qber(sample, expected_relation)
+    alice_key, bob_key_aligned = build_raw_key(remaining, expected_relation)
+
+    # Simulation-only cross-check: residual mismatches in the FINAL raw
+    # key. A real deployment cannot compute this without giving up the
+    # key's secrecy -- it exists here purely to validate the pipeline.
+    residual_mismatches = sum(1 for a, b in zip(alice_key, bob_key_aligned) if a != b)
+
+    return {
+        "n_key_rounds": len(key_rounds),
+        "n_sacrificed": len(sample),
+        "n_raw_key": len(alice_key),
+        "qber_estimated": qber_est,
+        "qber_estimated_margin": qber_est_margin,
+        "residual_mismatches": residual_mismatches,
+        "alice_key": alice_key,
+        "bob_key_aligned": bob_key_aligned,
+    }
+
+
 if __name__ == "__main__":
     ns.set_qstate_formalism(ns.QFormalism.DM)
 
@@ -410,3 +519,25 @@ if __name__ == "__main__":
     if stats["S"] is not None and abs(abs(stats["S"]) - 2 * numpy.sqrt(2)) > 3 * stats["S_margin"]:
         print("\nWARNING: |S| is far from 2*sqrt(2) beyond the statistical margin.")
         print("Check the basis exchange logic before moving to V3.")
+
+    print()
+    print("=" * 60)
+    print("V2.5 - Raw key extraction (parameter estimation + alignment)")
+    print("Out of scope here: error correction, privacy amplification (V4)")
+    print("=" * 60)
+
+    pipeline = run_key_extraction_pipeline(
+        alice_result, bob_result, config, expected_relation, sample_fraction=0.15
+    )
+
+    print(f"Key rounds (pre-sampling): {pipeline['n_key_rounds']}")
+    print(f"Sacrificed for estimation: {pipeline['n_sacrificed']}")
+    print(f"Raw key length:            {pipeline['n_raw_key']}")
+    if pipeline["qber_estimated"] is not None:
+        print(f"QBER (from sample only):   {pipeline['qber_estimated']*100:.2f}% +/- {pipeline['qber_estimated_margin']*100:.2f}%")
+    print(f"Residual mismatches in raw key (sim-only cross-check): {pipeline['residual_mismatches']}/{pipeline['n_raw_key']}")
+
+    if pipeline["residual_mismatches"] == 0:
+        print("Raw key identical on both sides (expected with no noise -- V1/V2 baseline).")
+    else:
+        print("Raw key NOT yet identical -- this residual gap is exactly what error correction (V4) resolves.")
