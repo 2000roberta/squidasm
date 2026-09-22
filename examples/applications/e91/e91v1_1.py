@@ -11,6 +11,8 @@ from squidasm.sim.stack.program import Program, ProgramContext, ProgramMeta
 from squidasm.util.util import get_qubit_state
 from squidasm.run.stack.config import (
     GenericQDeviceConfig,
+    NVQDeviceConfig,
+    HeraldedLinkConfig,
     LinkConfig,
     StackConfig,
     StackNetworkConfig,
@@ -67,6 +69,25 @@ DEFAULT_CONFIG = ProtocolConfig(
 )
 
 
+def wilson_interval(k: int, n: int, z: float = 1.96):
+    """Wilson score interval for a binomial proportion.
+
+    Unlike the normal-approximation interval (z * sqrt(p(1-p)/n)), this
+    does NOT collapse to a zero-width margin when k=0 or k=n -- exactly
+    the failure mode that gave a false "QBER: 0.00% +/- 0.00%" from a
+    32-sample batch with 0 observed mismatches, when the true rate
+    (confirmed against the full raw key) was ~9%. Returns
+    (point_estimate, lower_bound, upper_bound).
+    """
+    if n == 0:
+        return None, None, None
+    phat = k / n
+    denom = 1 + z ** 2 / n
+    center = (phat + z ** 2 / (2 * n)) / denom
+    half_width = (z * numpy.sqrt(phat * (1 - phat) / n + z ** 2 / (4 * n ** 2))) / denom
+    return phat, max(0.0, center - half_width), min(1.0, center + half_width)
+
+
 def expected_equal(a: int, b: int, parity: int) -> bool:
     """Pure predicate: does (a, b) match the calibrated expected relation?
 
@@ -83,7 +104,10 @@ def expected_equal(a: int, b: int, parity: int) -> bool:
 
 
 def create_perfect_network() -> StackNetworkConfig:
-    """Noiseless generic device + noiseless link: pure protocol validation."""
+    """Noiseless generic device + noiseless link: kept from V1/V2 as a
+    reference point -- run it alongside V3's noisy config to confirm the
+    pipeline itself hasn't regressed, isolating any change in behavior
+    to the noise sources introduced below."""
     qdevice_cfg = GenericQDeviceConfig.perfect_config()
     alice_stack = StackConfig(name="Alice", qdevice_typ="generic", qdevice_cfg=qdevice_cfg)
     bob_stack = StackConfig(name="Bob", qdevice_typ="generic", qdevice_cfg=qdevice_cfg)
@@ -92,6 +116,36 @@ def create_perfect_network() -> StackNetworkConfig:
         stack1="Alice", stack2="Bob",
         typ="default",
         cfg=DefaultCLinkConfig(delay=0.0),
+    )
+    return StackNetworkConfig(stacks=[alice_stack, bob_stack], links=[link], clinks=[clink])
+
+
+def create_nv_heralded_network(distance_km: float = 10.0) -> StackNetworkConfig:
+    """NV center device + heralded double-click link -- the realistic
+    noise sources: imperfect gates/measurement on the NV device, photon
+    loss and emission infidelity on the heralded link. The link can
+    herald different Bell states depending on which detector clicks
+    first (B00/B01/B10/B11) -- this is exactly why the empirical,
+    majority-vote calibration from V1/V2 matters here instead of a
+    hardcoded parity: if the link produces a STATISTICAL MIX of Bell
+    states rather than one dominant state, that mix itself becomes part
+    of the noise the majority vote correctly absorbs into a higher QBER
+    for the affected basis pair, without needing to know per-round which
+    state was actually produced.
+    """
+    nv_cfg = NVQDeviceConfig()
+    alice_stack = StackConfig(name="Alice", qdevice_typ="nv", qdevice_cfg=nv_cfg)
+    bob_stack = StackConfig(name="Bob", qdevice_typ="nv", qdevice_cfg=nv_cfg)
+
+    herald_cfg = HeraldedLinkConfig(
+        length=distance_km,
+        emission_fidelity=0.95,
+    )
+    link = LinkConfig(stack1="Alice", stack2="Bob", typ="heralded", cfg=herald_cfg)
+    clink = CLinkConfig(
+        stack1="Alice", stack2="Bob",
+        typ="default",
+        cfg=DefaultCLinkConfig(delay=distance_km / 200000 * 1e9),
     )
     return StackNetworkConfig(stacks=[alice_stack, bob_stack], links=[link], clinks=[clink])
 
@@ -209,6 +263,15 @@ class _OracleAliceProgram(Program):
         fidelities = {idx: calculate_fidelity_epr(dm, idx) for idx in BellIndex}
         best_idx = max(fidelities, key=fidelities.get)
 
+        # Discard measurement: the outcome is unused, this exists ONLY to
+        # free the qubit from simulated quantum memory. Without it, qubits
+        # from every round of num_times accumulate in the DM-tracked joint
+        # state, and the density matrix blows up in size round over round
+        # (fine for 2 rounds, pathological by round ~20) -- this is what
+        # caused the oracle diagnostic to hang.
+        epr.measure()
+        yield from connection.flush()
+
         return {"bell_index": str(best_idx), "fidelity": fidelities[best_idx]}
 
 
@@ -228,19 +291,36 @@ class _OracleBobProgram(Program):
         epr_socket = context.epr_sockets[self.PEER_NAME]
         connection = context.connection
 
-        epr_socket.recv_keep()
+        epr = epr_socket.recv_keep()[0]
+        yield from connection.flush()
+
+        # Same fix as the Alice side: discard-measure to free the qubit
+        # from simulated memory instead of leaving it allocated across
+        # every round of num_times.
+        epr.measure()
         yield from connection.flush()
 
         return {}
 
 
 def run_oracle_diagnostic(cfg: StackNetworkConfig, n_rounds: int = 20):
-    """Simulator-only diagnostic. Never used by production analysis."""
+    """Simulator-only diagnostic. Never used by production analysis.
+
+    DM formalism is only needed HERE (density-matrix based fidelity
+    extraction). Calibration and production runs never call
+    get_qubit_state, so they run in the default (much cheaper) KET
+    formalism -- switching only for this call keeps the bulk of the
+    simulation (500-1000+ rounds) fast, especially with a noisy NV
+    device + heralded link where DM tracking is expensive.
+    """
+    ns.set_qstate_formalism(ns.QFormalism.DM)
     alice_result, _ = run(
         config=cfg,
         programs={"Alice": _OracleAliceProgram(), "Bob": _OracleBobProgram()},
         num_times=n_rounds,
     )
+    ns.set_qstate_formalism(ns.QFormalism.KET)
+
     counts: Dict[str, int] = {}
     for r in alice_result:
         counts[r["bell_index"]] = counts.get(r["bell_index"], 0) + 1
@@ -324,10 +404,10 @@ def analyze(
             n_discarded += 1
 
     if n_sifted > 0:
-        qber = 1 - matches / n_sifted
-        qber_margin = 1.96 * numpy.sqrt(qber * (1 - qber) / n_sifted)
+        mismatches = n_sifted - matches
+        qber, qber_ci_low, qber_ci_high = wilson_interval(mismatches, n_sifted)
     else:
-        qber, qber_margin = None, None
+        qber, qber_ci_low, qber_ci_high = None, None, None
 
     correlations, n_per_pair = {}, {}
     for pair in config.test_pairs:
@@ -358,7 +438,8 @@ def analyze(
         "n_discarded": n_discarded,
         "sifted_rate": n_sifted / n_total if n_total else 0.0,
         "qber": qber,
-        "qber_margin": qber_margin,
+        "qber_ci_low": qber_ci_low,
+        "qber_ci_high": qber_ci_high,
         "S": S,
         "S_margin": S_margin,
     }
@@ -407,7 +488,15 @@ def sample_for_estimation(key_rounds, sample_fraction: float):
 def estimate_qber(sample, expected_relation: Dict[Tuple[int, int], int]):
     """QBER estimated ONLY from the sacrificed sample -- this is the
     number a real protocol would actually have available, since the
-    remaining (secret) bits are never compared directly."""
+    remaining (secret) bits are never compared directly.
+
+    Uses the Wilson interval (see wilson_interval() above) instead of
+    the normal approximation, specifically because sample sizes here
+    are small (tens of rounds) and QBER estimates of exactly 0% from
+    small samples are common and were shown to be badly misleading
+    (0.00% +/- 0.00% from a sample where the true rate, confirmed
+    against the full raw key, was ~9%).
+    """
     n = 0
     mismatches = 0
     for a_bit, b_bit, pair in sample:
@@ -419,10 +508,8 @@ def estimate_qber(sample, expected_relation: Dict[Tuple[int, int], int]):
             mismatches += 1
 
     if n == 0:
-        return None, None
-    qber = mismatches / n
-    qber_margin = 1.96 * numpy.sqrt(qber * (1 - qber) / n)
-    return qber, qber_margin
+        return None, None, None
+    return wilson_interval(mismatches, n)
 
 
 def build_raw_key(remaining, expected_relation: Dict[Tuple[int, int], int]):
@@ -455,7 +542,7 @@ def run_key_extraction_pipeline(
     key_rounds = extract_key_rounds(alice_result, bob_result, config)
     sample, remaining = sample_for_estimation(key_rounds, sample_fraction)
 
-    qber_est, qber_est_margin = estimate_qber(sample, expected_relation)
+    qber_est, qber_est_ci_low, qber_est_ci_high = estimate_qber(sample, expected_relation)
     alice_key, bob_key_aligned = build_raw_key(remaining, expected_relation)
 
     # Simulation-only cross-check: residual mismatches in the FINAL raw
@@ -468,43 +555,36 @@ def run_key_extraction_pipeline(
         "n_sacrificed": len(sample),
         "n_raw_key": len(alice_key),
         "qber_estimated": qber_est,
-        "qber_estimated_margin": qber_est_margin,
+        "qber_estimated_ci_low": qber_est_ci_low,
+        "qber_estimated_ci_high": qber_est_ci_high,
         "residual_mismatches": residual_mismatches,
         "alice_key": alice_key,
         "bob_key_aligned": bob_key_aligned,
     }
 
 
-if __name__ == "__main__":
-    ns.set_qstate_formalism(ns.QFormalism.DM)
-
-    cfg = create_perfect_network()
-    config = DEFAULT_CONFIG
-
+def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: str,
+                       n_calib_rounds: int = 500, num_rounds: int = 1000,
+                       sample_fraction: float = 0.15):
     print("=" * 60)
-    print("ORACLE DIAGNOSTIC (simulator-only, not used by production code)")
+    print(f"{label}")
     print("=" * 60)
+
+    print("--- Oracle diagnostic (simulator-only) ---")
     dominant_bell_state, bell_state_counts, avg_fid = run_oracle_diagnostic(cfg, n_rounds=20)
     print(f"Dominant Bell state observed: {dominant_bell_state} {bell_state_counts}")
     print(f"Average fidelity to dominant state: {avg_fid:.4f}")
     print()
 
-    print("=" * 60)
-    print("CALIBRATION (empirical, no oracle access)")
-    print("=" * 60)
-    expected_relation = calibrate_expected_relation(cfg, config, n_calib_rounds=300)
+    print("--- Calibration (empirical, no oracle access) ---")
+    expected_relation = calibrate_expected_relation(cfg, config, n_calib_rounds=n_calib_rounds)
     for pair, parity in expected_relation.items():
-        label = "correlated (a==b)" if parity == 1 else "anti-correlated (a!=b)"
-        print(f"Basis pair {pair}: {label}")
+        label_p = "correlated (a==b)" if parity == 1 else "anti-correlated (a!=b)"
+        print(f"Basis pair {pair}: {label_p}")
     print()
 
-    print("=" * 60)
-    print("E91 V2 - Classical basis exchange, sifting as post-processing")
-    print("Expected: |S| ~= 2.828, QBER ~= 0%")
-    print("=" * 60)
-
-    NUM_ROUNDS = 1000
-    alice_result, bob_result = run_e91_v2(cfg, config, NUM_ROUNDS)
+    print("--- Production run + sifting ---")
+    alice_result, bob_result = run_e91_v2(cfg, config, num_rounds)
     stats = analyze(alice_result, bob_result, config, expected_relation)
 
     print(f"Total rounds:       {stats['n_total']}")
@@ -512,32 +592,54 @@ if __name__ == "__main__":
     print(f"CHSH test rounds:   {stats['n_test']}")
     print(f"Discarded rounds:   {stats['n_discarded']}")
     if stats["qber"] is not None:
-        print(f"QBER:  {stats['qber']*100:.2f}% +/- {stats['qber_margin']*100:.2f}%")
+        print(f"QBER:  {stats['qber']*100:.2f}%  (95% CI: [{stats['qber_ci_low']*100:.2f}%, {stats['qber_ci_high']*100:.2f}%])")
     if stats["S"] is not None:
-        print(f"CHSH S: {stats['S']:.4f} +/- {stats['S_margin']:.4f}  (|S| target: 2.8284)")
-
-    if stats["S"] is not None and abs(abs(stats["S"]) - 2 * numpy.sqrt(2)) > 3 * stats["S_margin"]:
-        print("\nWARNING: |S| is far from 2*sqrt(2) beyond the statistical margin.")
-        print("Check the basis exchange logic before moving to V3.")
-
+        print(f"CHSH S: {stats['S']:.4f} +/- {stats['S_margin']:.4f}  (noiseless reference: 2.8284)")
+        s_lower_bound = abs(stats["S"]) - stats["S_margin"]
+        if s_lower_bound <= 2:
+            print(f"WARNING: 95% CI lower bound on |S| ({s_lower_bound:.4f}) is <= 2 -- "
+                  f"Bell violation NOT confidently established. Key should NOT be treated as "
+                  f"certifiably secure without more statistics (more test rounds).")
     print()
-    print("=" * 60)
-    print("V2.5 - Raw key extraction (parameter estimation + alignment)")
-    print("Out of scope here: error correction, privacy amplification (V4)")
-    print("=" * 60)
 
+    print("--- Raw key extraction (parameter estimation + alignment) ---")
     pipeline = run_key_extraction_pipeline(
-        alice_result, bob_result, config, expected_relation, sample_fraction=0.15
+        alice_result, bob_result, config, expected_relation, sample_fraction=sample_fraction
     )
-
     print(f"Key rounds (pre-sampling): {pipeline['n_key_rounds']}")
     print(f"Sacrificed for estimation: {pipeline['n_sacrificed']}")
     print(f"Raw key length:            {pipeline['n_raw_key']}")
     if pipeline["qber_estimated"] is not None:
-        print(f"QBER (from sample only):   {pipeline['qber_estimated']*100:.2f}% +/- {pipeline['qber_estimated_margin']*100:.2f}%")
+        print(f"QBER (from sample only):   {pipeline['qber_estimated']*100:.2f}%  "
+              f"(95% CI: [{pipeline['qber_estimated_ci_low']*100:.2f}%, {pipeline['qber_estimated_ci_high']*100:.2f}%])")
     print(f"Residual mismatches in raw key (sim-only cross-check): {pipeline['residual_mismatches']}/{pipeline['n_raw_key']}")
+    if pipeline["n_raw_key"] > 0:
+        residual_rate = pipeline['residual_mismatches'] / pipeline['n_raw_key']
+        print(f"Residual mismatch rate: {residual_rate*100:.2f}% -- this is exactly what error correction (V4) would still need to fix.")
+    print()
 
-    if pipeline["residual_mismatches"] == 0:
-        print("Raw key identical on both sides (expected with no noise -- V1/V2 baseline).")
-    else:
-        print("Raw key NOT yet identical -- this residual gap is exactly what error correction (V4) resolves.")
+    return stats, pipeline
+
+
+if __name__ == "__main__":
+    # No longer setting DM formalism globally -- run_oracle_diagnostic()
+    # switches to it only for its own call and restores KET afterward.
+    config = DEFAULT_CONFIG
+
+    # Reference run: same pipeline, zero noise -- confirms the pipeline
+    # itself is unchanged before looking at the noisy numbers below.
+    perfect_cfg = create_perfect_network()
+    run_full_pipeline(perfect_cfg, config, "REFERENCE: V1/V2 perfect network (no noise)")
+
+    # V3: NV device + heralded link at a representative distance.
+    DISTANCE_KM = 10.0
+    noisy_cfg = create_nv_heralded_network(distance_km=DISTANCE_KM)
+    # Larger num_rounds and sample_fraction than the default: with real
+    # noise, QBER needs enough sacrificed samples to be estimated with a
+    # useful margin (the 32-sample estimate earlier had a Wilson
+    # interval spanning roughly 0-15% at ~8% true QBER -- not useless,
+    # but wide). This trades more simulation time for a tighter CI.
+    run_full_pipeline(
+        noisy_cfg, config, f"V3: NV device + heralded link ({DISTANCE_KM} km)",
+        num_rounds=3000, sample_fraction=0.25,
+    )
