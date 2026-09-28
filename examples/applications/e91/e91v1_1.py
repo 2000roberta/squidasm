@@ -21,36 +21,26 @@ from squidasm.run.stack.config import (
 )
 
 # ============================================================
-# E91 - VERSION 2
-#
-# 1. AliceProgram / BobProgram do ONLY quantum operations + basis
-#    exchange. They have no notion of "key" / "test" / "discard" --
-#    that classification is sifting POLICY, decided later, from the
-#    publicly exchanged basis indices, by whoever is doing the
-#    post-processing (here: the analysis functions below). Neither
-#    node needs to know in real time what a round will be used for.
-#
-# 2. Basis exchange is a single symmetric function, exchange_basis(),
-#    used identically by both Alice and Bob. No assumption about which
-#    side the classical channel serves first.
-#
-# 3. All protocol-specific parameters (measurement angles, which basis
-#    pairs are "key" vs "test") live in a ProtocolConfig object passed
-#    into the programs and into analysis, instead of module-level
-#    globals -- V3 can change angles/pairs without touching the
-#    programs themselves.
-#
-# 4. Bit comparison uses a pure predicate, expected_equal(a, b, parity),
-#    instead of mutating Bob's outcome. Raw outcomes are never modified.
+# E91 / BBM92 on SquidASM.
+# The protocol is selected by a ProtocolConfig (measurement angles,
+# "key" pairs, "test" pairs). AliceProgram / BobProgram do only quantum
+# operations + basis exchange and do not know which protocol is running;
+# sifting is post-processing.
 # ============================================================
 
 
 @dataclass(frozen=True)
 class ProtocolConfig:
+    name: str
     alice_angles: Tuple[float, ...]
     bob_angles: Tuple[float, ...]
     key_pairs: Tuple[Tuple[int, int], ...]
     test_pairs: Tuple[Tuple[int, int], ...]
+
+    @property
+    def has_bell_test(self) -> bool:
+        # CHSH needs exactly 4 correlators (2 settings per side)
+        return len(self.test_pairs) == 4
 
     def classify(self, a_idx: int, b_idx: int) -> str:
         pair = (a_idx, b_idx)
@@ -61,12 +51,25 @@ class ProtocolConfig:
         return "discard"
 
 
-DEFAULT_CONFIG = ProtocolConfig(
+E91_CONFIG = ProtocolConfig(
+    name="e91",
     alice_angles=(0.0, numpy.pi / 4, numpy.pi / 2),
     bob_angles=(numpy.pi / 4, numpy.pi / 2, 3 * numpy.pi / 4),
     key_pairs=((1, 0), (2, 1)),
     test_pairs=((0, 0), (0, 2), (2, 0), (2, 2)),
 )
+
+# BBM92: two bases (Z and X) on both sides; same basis -> key, different -> discard.
+BBM92_CONFIG = ProtocolConfig(
+    name="bbm92",
+    alice_angles=(0.0, numpy.pi / 2),
+    bob_angles=(0.0, numpy.pi / 2),
+    key_pairs=((0, 0), (1, 1)),
+    test_pairs=(),
+)
+
+PROTOCOLS = {"e91": E91_CONFIG, "bbm92": BBM92_CONFIG}
+DEFAULT_CONFIG = E91_CONFIG  # kept so existing imports (sweep script) keep working
 
 
 def wilson_interval(k: int, n: int, z: float = 1.96):
@@ -164,6 +167,16 @@ def exchange_basis(csocket, my_idx: int):
     peer_idx = int((yield from csocket.recv()))
     return peer_idx
 
+# def apply_basis_change(q, angle: float):
+    """Rotate q so a Z-measurement measures in the basis at `angle`.
+    0 -> no gate; pi/2 -> H (both Clifford, so BBM92 needs no arbitrary
+    rotation). Any other angle (E91) falls back to rot_Y."""
+    if numpy.isclose(angle, 0.0):
+        return
+    if numpy.isclose(angle, numpy.pi / 2):
+        q.H()
+    else:
+        q.rot_Y(angle=angle)
 
 # ============================================================
 # PRODUCTION PROGRAMS - quantum operations + basis exchange only.
@@ -384,7 +397,7 @@ def calibrate_expected_relation(
     return expected_relation
 
 
-def run_e91_v2(cfg: StackNetworkConfig, config: ProtocolConfig, num_rounds: int):
+def run_protocol(cfg: StackNetworkConfig, config: ProtocolConfig, num_rounds: int):
     return run(
         config=cfg,
         programs={"Alice": AliceProgram(config), "Bob": BobProgram(config)},
@@ -449,7 +462,7 @@ def analyze(
         n_per_pair[pair] = n
         correlations[pair] = (d["same"] - d["diff"]) / n if n > 0 else None
 
-    if all(v is not None for v in correlations.values()):
+    if config.has_bell_test and all(v is not None for v in correlations.values()):
         S = (
             correlations[config.test_pairs[0]]
             - correlations[config.test_pairs[1]]
@@ -479,6 +492,45 @@ def analyze(
         "avg_total_latency_ns": numpy.mean(total_latencies_ns) if total_latencies_ns else None,
         "total_elapsed_ns": sum(total_latencies_ns),
     }
+
+QBER_THRESHOLD = 0.11  # asymptotic one-way threshold: 1 - 2*h2(Q) = 0 at Q ~ 11%
+
+
+def security_check(stats, config: ProtocolConfig):
+    """Returns (ok, message).
+
+    E91:   Bell violation must be established, i.e. the lower bound of the
+           95% CI on |S| must exceed 2.
+    BBM92: there is no S; the upper bound of the 95% CI on the QBER must stay
+           below the asymptotic threshold (trusted-device assumption).
+    """
+    if config.has_bell_test:
+        if stats["S"] is None:
+            return False, "S not computable (missing test rounds)"
+        lower = abs(stats["S"]) - stats["S_margin"]
+        if lower > 2:
+            return True, f"Bell violation established (CI lower bound on |S| = {lower:.3f} > 2)"
+        return False, (f"CI lower bound on |S| = {lower:.3f} <= 2: Bell violation NOT confidently "
+                       f"established, key not certifiable without more test rounds")
+    if stats["qber_ci_high"] is None:
+        return False, "QBER not computable (no key rounds)"
+    if stats["qber_ci_high"] < QBER_THRESHOLD:
+        return True, (f"QBER upper bound {stats['qber_ci_high']*100:.2f}% is below the "
+                      f"{QBER_THRESHOLD*100:.0f}% threshold")
+    return False, (f"QBER upper bound {stats['qber_ci_high']*100:.2f}% is not below the "
+                   f"{QBER_THRESHOLD*100:.0f}% threshold: no secret key can be guaranteed")
+
+
+def qber_by_key_pair(alice_result, bob_result, config: ProtocolConfig, expected_relation):
+    """QBER separately for each key basis pair (e.g. Z-Z and X-X in BBM92)."""
+    counts = {pair: [0, 0] for pair in config.key_pairs}
+    for ar, br in zip(alice_result, bob_result):
+        pair = (ar["basis"], br["basis"])
+        if pair in counts and pair in expected_relation:
+            counts[pair][0] += 1
+            if not expected_equal(ar["outcome"], br["outcome"], expected_relation[pair]):
+                counts[pair][1] += 1
+    return {p: wilson_interval(m, n) for p, (n, m) in counts.items() if n > 0}
 
 
 # ============================================================
@@ -620,27 +672,20 @@ def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: st
     print()
 
     print("--- Production run + sifting ---")
-    alice_result, bob_result = run_e91_v2(cfg, config, num_rounds)
+    alice_result, bob_result = run_protocol(cfg, config, num_rounds)
     stats = analyze(alice_result, bob_result, config, expected_relation)
 
     print(f"Total rounds:       {stats['n_total']}")
     print(f"Sifted key length:  {stats['n_sifted']} ({stats['sifted_rate']*100:.1f}% of rounds)")
-    print(f"CHSH test rounds:   {stats['n_test']}")
+    if config.has_bell_test:
+        print(f"CHSH test rounds:   {stats['n_test']}")
     print(f"Discarded rounds:   {stats['n_discarded']}")
     if stats["qber"] is not None:
         print(f"QBER:  {stats['qber']*100:.2f}%  (95% CI: [{stats['qber_ci_low']*100:.2f}%, {stats['qber_ci_high']*100:.2f}%])")
     if stats["S"] is not None:
         print(f"CHSH S: {stats['S']:.4f} +/- {stats['S_margin']:.4f}  (noiseless reference: 2.8284)")
-        s_lower_bound = abs(stats["S"]) - stats["S_margin"]
-        if s_lower_bound <= 2:
-            print(f"WARNING: 95% CI lower bound on |S| ({s_lower_bound:.4f}) is <= 2 -- "
-                  f"Bell violation NOT confidently established. Key should NOT be treated as "
-                  f"certifiably secure without more statistics (more test rounds).")
-    if stats["avg_entanglement_latency_ns"] is not None:
-        print(f"Avg entanglement latency: {stats['avg_entanglement_latency_ns']/1e6:.4f} ms")
-        print(f"Avg total round latency:  {stats['avg_total_latency_ns']/1e6:.4f} ms  "
-              f"(classical exchange overhead: {(stats['avg_total_latency_ns']-stats['avg_entanglement_latency_ns'])/1e6:.4f} ms)")
-        print(f"Total elapsed (all {stats['n_total']} rounds): {stats['total_elapsed_ns']/1e9:.4f} s")
+    ok, msg = security_check(stats, config)
+    print(f"{'OK' if ok else 'WARNING'}: {msg}")
     print()
 
     print("--- Raw key extraction (parameter estimation + alignment) ---")
@@ -656,7 +701,7 @@ def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: st
     print(f"Residual mismatches in raw key (sim-only cross-check): {pipeline['residual_mismatches']}/{pipeline['n_raw_key']}")
     if pipeline["n_raw_key"] > 0:
         residual_rate = pipeline['residual_mismatches'] / pipeline['n_raw_key']
-        print(f"Residual mismatch rate: {residual_rate*100:.2f}% -- this is exactly what error correction (V4) would still need to fix.")
+        print(f"Residual mismatch rate: {residual_rate*100:.2f}% -- this is what error correction would fix.")
 
     # Throughput: raw key bits per second of ACTUAL simulated protocol
     # operation -- uses total_elapsed_ns from ALL num_rounds (test and
@@ -674,16 +719,19 @@ def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: st
 
 
 if __name__ == "__main__":
-    # No longer setting DM formalism globally -- run_oracle_diagnostic()
-    # switches to it only for its own call and restores KET afterward.
-    config = DEFAULT_CONFIG
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--protocol", choices=sorted(PROTOCOLS), default="e91")
+    args = parser.parse_args()
+    config = PROTOCOLS[args.protocol]
 
     # Reference run: same pipeline, zero noise -- confirms the pipeline
     # itself is unchanged before looking at the noisy numbers below.
     perfect_cfg = create_perfect_network()
-    run_full_pipeline(perfect_cfg, config, "REFERENCE: V1/V2 perfect network (no noise)")
+    run_full_pipeline(perfect_cfg, config, f"[{config.name}] REFERENCE: perfect network (no noise)")
 
-    # V3: NV device + heralded link at a representative distance.
+    # NV device + heralded link
     DISTANCE_KM = 10.0
     noisy_cfg = create_nv_heralded_network(distance_km=DISTANCE_KM)
     # Larger num_rounds and sample_fraction than the default: with real
@@ -692,6 +740,9 @@ if __name__ == "__main__":
     # interval spanning roughly 0-15% at ~8% true QBER -- not useless,
     # but wide). This trades more simulation time for a tighter CI.
     run_full_pipeline(
-        noisy_cfg, config, f"V3: NV device + heralded link ({DISTANCE_KM} km)",
+        noisy_cfg, config, f"[{config.name}] NV device + heralded link ({DISTANCE_KM} km)",
         num_rounds=3000, sample_fraction=0.25,
     )
+
+    print()
+    print(f"Run 'python e91v1_1.py --protocol bbm92' to select BBM92 protocol (default: E91).")
