@@ -191,6 +191,8 @@ class AliceProgram(Program):
         csocket = context.csockets[self.PEER_NAME]
         connection = context.connection
 
+        t_start = ns.sim_time()
+
         a_idx = int(numpy.random.randint(0, len(self.config.alice_angles)))
 
         epr = epr_socket.create_keep()[0]
@@ -198,9 +200,19 @@ class AliceProgram(Program):
         a = epr.measure()
         yield from connection.flush()
 
+        t_entanglement_done = ns.sim_time()
+
         b_idx = yield from exchange_basis(csocket, a_idx)
 
-        return {"basis": a_idx, "peer_basis": b_idx, "outcome": int(a)}
+        t_round_done = ns.sim_time()
+
+        return {
+            "basis": a_idx,
+            "peer_basis": b_idx,
+            "outcome": int(a),
+            "entanglement_latency_ns": t_entanglement_done - t_start,
+            "total_latency_ns": t_round_done - t_start,
+        }
 
 
 class BobProgram(Program):
@@ -224,6 +236,8 @@ class BobProgram(Program):
         csocket = context.csockets[self.PEER_NAME]
         connection = context.connection
 
+        t_start = ns.sim_time()
+
         b_idx = int(numpy.random.randint(0, len(self.config.bob_angles)))
 
         epr = epr_socket.recv_keep()[0]
@@ -231,9 +245,19 @@ class BobProgram(Program):
         b = epr.measure()
         yield from connection.flush()
 
+        t_entanglement_done = ns.sim_time()
+
         a_idx = yield from exchange_basis(csocket, b_idx)
 
-        return {"basis": b_idx, "peer_basis": a_idx, "outcome": int(b)}
+        t_round_done = ns.sim_time()
+
+        return {
+            "basis": b_idx,
+            "peer_basis": a_idx,
+            "outcome": int(b),
+            "entanglement_latency_ns": t_entanglement_done - t_start,
+            "total_latency_ns": t_round_done - t_start,
+        }
 
 
 # ============================================================
@@ -379,9 +403,18 @@ def analyze(
     matches = 0
     correlations_data = {pair: {"same": 0, "diff": 0} for pair in config.test_pairs}
 
+    # Latency: summed (not averaged) total_latency_ns across ALL rounds --
+    # this is the real elapsed time the batch took, used below to derive
+    # throughput (raw key bits per second), not just per-round averages.
+    entanglement_latencies_ns = []
+    total_latencies_ns = []
+
     for ar, br in zip(alice_result, bob_result):
         pair = (ar["basis"], br["basis"])
         round_type = config.classify(*pair)
+
+        entanglement_latencies_ns.append(ar["entanglement_latency_ns"])
+        total_latencies_ns.append(ar["total_latency_ns"])
 
         if round_type == "key":
             n_sifted += 1
@@ -442,6 +475,9 @@ def analyze(
         "qber_ci_high": qber_ci_high,
         "S": S,
         "S_margin": S_margin,
+        "avg_entanglement_latency_ns": numpy.mean(entanglement_latencies_ns) if entanglement_latencies_ns else None,
+        "avg_total_latency_ns": numpy.mean(total_latencies_ns) if total_latencies_ns else None,
+        "total_elapsed_ns": sum(total_latencies_ns),
     }
 
 
@@ -600,6 +636,11 @@ def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: st
             print(f"WARNING: 95% CI lower bound on |S| ({s_lower_bound:.4f}) is <= 2 -- "
                   f"Bell violation NOT confidently established. Key should NOT be treated as "
                   f"certifiably secure without more statistics (more test rounds).")
+    if stats["avg_entanglement_latency_ns"] is not None:
+        print(f"Avg entanglement latency: {stats['avg_entanglement_latency_ns']/1e6:.4f} ms")
+        print(f"Avg total round latency:  {stats['avg_total_latency_ns']/1e6:.4f} ms  "
+              f"(classical exchange overhead: {(stats['avg_total_latency_ns']-stats['avg_entanglement_latency_ns'])/1e6:.4f} ms)")
+        print(f"Total elapsed (all {stats['n_total']} rounds): {stats['total_elapsed_ns']/1e9:.4f} s")
     print()
 
     print("--- Raw key extraction (parameter estimation + alignment) ---")
@@ -616,6 +657,17 @@ def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: st
     if pipeline["n_raw_key"] > 0:
         residual_rate = pipeline['residual_mismatches'] / pipeline['n_raw_key']
         print(f"Residual mismatch rate: {residual_rate*100:.2f}% -- this is exactly what error correction (V4) would still need to fix.")
+
+    # Throughput: raw key bits per second of ACTUAL simulated protocol
+    # operation -- uses total_elapsed_ns from ALL num_rounds (test and
+    # discard rounds cost time too, not just key rounds), not just an
+    # average per-round latency times round count. This is what lets you
+    # compare "bits/sec" across distances/configs later, not just raw
+    # counts, which are misleading once latency varies with distance.
+    if stats["total_elapsed_ns"] and stats["total_elapsed_ns"] > 0:
+        throughput_bps = pipeline["n_raw_key"] / (stats["total_elapsed_ns"] * 1e-9)
+        print(f"Raw key throughput: {throughput_bps:.4f} bits/s "
+              f"({pipeline['n_raw_key']} raw key bits / {stats['total_elapsed_ns']/1e9:.4f} s elapsed)")
     print()
 
     return stats, pipeline
