@@ -28,3 +28,4 @@ examples/applications/chsh_game/risultati_nv_heralded.csv
 examples/applications/chsh_game/chsh_noise.py
 examples/applications/e91/risultati_e91_heralded.csv
 examples/applications/chsh_game/chsh_noise.py
+examples/applications/e91/e91_distance_sweep.csv
