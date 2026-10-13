@@ -36,6 +36,7 @@ class ProtocolConfig:
     bob_angles: Tuple[float, ...]
     key_pairs: Tuple[Tuple[int, int], ...]
     test_pairs: Tuple[Tuple[int, int], ...]
+    # clifford_safe: bool = False   # True solo se ogni correlatore usato è a basi accoppiate
 
     @property
     def has_bell_test(self) -> bool:
@@ -66,6 +67,7 @@ BBM92_CONFIG = ProtocolConfig(
     bob_angles=(0.0, numpy.pi / 2),
     key_pairs=((0, 0), (1, 1)),
     test_pairs=(),
+    # clifford_safe: bool = False   # True solo se ogni correlatore usato è a basi accoppiate
 )
 
 PROTOCOLS = {"e91": E91_CONFIG, "bbm92": BBM92_CONFIG}
@@ -210,6 +212,11 @@ class AliceProgram(Program):
 
         epr = epr_socket.create_keep()[0]
         epr.rot_Y(angle=self.config.alice_angles[a_idx])
+        # if self.config.clifford_safe:
+        #    apply_basis_change(epr, self.config.alice_angles[a_idx])
+        # else:
+        #    epr.rot_Y(angle=self.config.alice_angles[a_idx])
+
         a = epr.measure()
         yield from connection.flush()
 
@@ -255,6 +262,10 @@ class BobProgram(Program):
 
         epr = epr_socket.recv_keep()[0]
         epr.rot_Y(angle=self.config.bob_angles[b_idx])
+        # if self.config.clifford_safe:
+        #    apply_basis_change(epr, self.config.bob_angles[b_idx])
+        # else:
+        #    epr.rot_Y(angle=self.config.bob_angles[b_idx])
         b = epr.measure()
         yield from connection.flush()
 
@@ -372,7 +383,7 @@ def run_oracle_diagnostic(cfg: StackNetworkConfig, n_rounds: int = 20):
 # ============================================================
 
 def calibrate_expected_relation(
-    cfg: StackNetworkConfig, config: ProtocolConfig, n_calib_rounds: int = 300
+    cfg: StackNetworkConfig, config: ProtocolConfig, n_calib_rounds: int = 1500
 ) -> Dict[Tuple[int, int], int]:
     """Empirical, oracle-free calibration of same/anti-correlated parity
     for each key-pair basis combination, via majority vote."""
@@ -652,7 +663,7 @@ def run_key_extraction_pipeline(
 
 
 def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: str,
-                       n_calib_rounds: int = 500, num_rounds: int = 1000,
+                       n_calib_rounds: int = 1500, num_rounds: int = 10000,
                        sample_fraction: float = 0.15):
     print("=" * 60)
     print(f"{label}")
@@ -674,6 +685,10 @@ def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: st
     print("--- Production run + sifting ---")
     alice_result, bob_result = run_protocol(cfg, config, num_rounds)
     stats = analyze(alice_result, bob_result, config, expected_relation)
+
+    qber_split = qber_by_key_pair(alice_result, bob_result, config, expected_relation)
+    for pair, (point, lo, hi) in qber_split.items():
+        print(f"QBER basis {pair}: {point*100:.2f}% (CI [{lo*100:.2f}%, {hi*100:.2f}%])")
 
     print(f"Total rounds:       {stats['n_total']}")
     print(f"Sifted key length:  {stats['n_sifted']} ({stats['sifted_rate']*100:.1f}% of rounds)")
@@ -741,7 +756,7 @@ if __name__ == "__main__":
     # but wide). This trades more simulation time for a tighter CI.
     run_full_pipeline(
         noisy_cfg, config, f"[{config.name}] NV device + heralded link ({DISTANCE_KM} km)",
-        num_rounds=3000, sample_fraction=0.25,
+        num_rounds=10000, sample_fraction=0.25,
     )
 
     print()
