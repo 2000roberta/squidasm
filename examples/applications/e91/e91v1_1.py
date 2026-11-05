@@ -125,7 +125,7 @@ def create_perfect_network() -> StackNetworkConfig:
     return StackNetworkConfig(stacks=[alice_stack, bob_stack], links=[link], clinks=[clink])
 
 
-def create_nv_heralded_network(distance_km: float = 10.0) -> StackNetworkConfig:
+def create_nv_heralded_network(distance_km: float = 10.0, emission_fidelity: float = 0.95) -> StackNetworkConfig:
     """NV center device + heralded double-click link -- the realistic
     noise sources: imperfect gates/measurement on the NV device, photon
     loss and emission infidelity on the heralded link. The link can
@@ -144,7 +144,7 @@ def create_nv_heralded_network(distance_km: float = 10.0) -> StackNetworkConfig:
 
     herald_cfg = HeraldedLinkConfig(
         length=distance_km,
-        emission_fidelity=0.95,
+        emission_fidelity=emission_fidelity,
     )
     link = LinkConfig(stack1="Alice", stack2="Bob", typ="heralded", cfg=herald_cfg)
     clink = CLinkConfig(
