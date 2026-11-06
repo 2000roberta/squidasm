@@ -21,7 +21,9 @@ THRESHOLD_QBER = 0.11
 
 STYLE = {"e91": ("tab:blue", "o"), "bbm92": ("tab:orange", "s")}
 
-df = pd.read_csv(CSV)
+df_all = pd.read_csv(CSV)
+DIST_LINE_PLOTS = 10.0
+df = df_all[df_all["distance_km"] == DIST_LINE_PLOTS]
 col = "qber_sample" if USE_SAMPLE_QBER else "qber"
 
 fig, (ax_q, ax_t) = plt.subplots(1, 2, figsize=(13, 5))
@@ -109,5 +111,39 @@ fig_s.suptitle("E91, barre di errore = intervallo di confidenza al 95%", fontsiz
 fig_s.tight_layout()
 fig_s.savefig(OUT_PNG_S, dpi=150)
 print(f"Saved plot to {OUT_PNG_S}")
+
+# ---- distanza x fidelity consegnata: throughput della chiave valida ----
+OUT_PNG_MAP = "e91_bbm92_distancevsfidelity.png"
+FID_MIN = 0.8
+fig_m, axes = plt.subplots(1, 2, figsize=(13, 5), sharex=True, sharey=True)
+#vmax = df_all.loc[df_all["fidelity"] >= FID_MIN, "throughput_bps"].max()
+from matplotlib.colors import LogNorm
+tp_pos = df_all.loc[(df_all["fidelity"] >= FID_MIN) & (df_all["throughput_bps"] > 0), "throughput_bps"]
+norm = LogNorm(vmin=tp_pos.min(), vmax=tp_pos.max())
+sm = plt.cm.ScalarMappable(norm=norm, cmap="viridis")
+
+for ax, protocol in zip(axes, ["e91", "bbm92"]):
+    d = df_all[(df_all["protocol"] == protocol) & (df_all["fidelity"] >= FID_MIN)].copy()
+    if protocol == "e91":
+        d["ok"] = (d["s_ci_low"] > 2) if USE_CI else (d["s_abs"] > 2)
+        crit = r"$S_{\mathrm{low}}>2$" if USE_CI else r"$|S|>2$"
+    else:
+        d["ok"] = (d[col + "_ci_high"] < THRESHOLD_QBER) if USE_CI else (d[col] < THRESHOLD_QBER)
+        crit = f"QBER < {THRESHOLD_QBER * 100:.0f}%"
+
+    bad, good = d[~d["ok"]], d[d["ok"]]
+    ax.scatter(bad["distance_km"], bad["fidelity"], marker="x", color="gray", s=40,
+               label="test non superato")
+    ax.scatter(good["distance_km"], good["fidelity"], c=good["throughput_bps"],
+               cmap="viridis", norm=norm, s=90, edgecolor="k")
+    ax.set_xlabel("Distance (km)")
+    ax.set_title(f"{protocol.upper()}: {crit}")
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(FID_MIN - 0.01, 1.005)
+    ax.legend(fontsize=8, loc="lower right")
+axes[0].set_ylabel("Delivered fidelity")
+fig_m.colorbar(sm, ax=axes, label="Throughput della chiave valida (bit/s)")
+fig_m.savefig(OUT_PNG_MAP, dpi=150, bbox_inches="tight")
+print(f"Saved plot to {OUT_PNG_MAP}")
 
 plt.show()

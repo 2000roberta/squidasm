@@ -30,7 +30,7 @@ from e91v1_1 import (
 )
 
 OUT_CSV = "e91_bbm92_fidelity_sweep.csv"
-DISTANCE_KM = 10.0
+DISTANCE_KM = [1.0, 10.0, 25.0, 50.0]
 EMISSION_FIDELITIES = [0.75, 0.80, 0.85, 0.90, 0.92, 0.94, 0.96, 0.98, 1.00]
 NUM_ROUNDS = 10000        # per run; lower it (e.g. 1000) for a quick test
 CALIB_ROUNDS = 500
@@ -40,20 +40,19 @@ ORACLE_ROUNDS = 20
 _fidelity_cache = {}
 
 
-def delivered_fidelity(cfg, emission_fidelity: float) -> float:
-    """Average fidelity of the delivered pair to its closest Bell state (oracle, DM).
-    Computed once per emission_fidelity and shared by both protocols."""
-    if emission_fidelity not in _fidelity_cache:
+def delivered_fidelity(cfg, distance_km: float, emission_fidelity: float) -> float:
+    key = (round(float(distance_km), 6), round(float(emission_fidelity), 6))
+    if key not in _fidelity_cache:
         _, _, avg_fidelity = run_oracle_diagnostic(cfg, n_rounds=ORACLE_ROUNDS)
-        _fidelity_cache[emission_fidelity] = float(avg_fidelity)
-    return _fidelity_cache[emission_fidelity]
+        _fidelity_cache[key] = float(avg_fidelity)
+    return _fidelity_cache[key]
 
 
-def run_one(emission_fidelity: float, protocol: str) -> dict:
-    cfg = create_nv_heralded_network(distance_km=DISTANCE_KM, emission_fidelity=emission_fidelity)
+def run_one(distance_km: float, emission_fidelity: float, protocol: str) -> dict:
+    cfg = create_nv_heralded_network(distance_km=distance_km, emission_fidelity=emission_fidelity)
     config = PROTOCOLS[protocol]
 
-    fidelity = delivered_fidelity(cfg, emission_fidelity)
+    fidelity = delivered_fidelity(cfg, distance_km, emission_fidelity)
 
     expected_relation = calibrate_expected_relation(cfg, config, n_calib_rounds=CALIB_ROUNDS)
     alice_result, bob_result = run_protocol(cfg, config, NUM_ROUNDS)
@@ -67,7 +66,7 @@ def run_one(emission_fidelity: float, protocol: str) -> dict:
         "protocol": protocol,
         "emission_fidelity": emission_fidelity,
         "fidelity": fidelity,
-        "distance_km": DISTANCE_KM,
+        "distance_km": distance_km,
         "n_rounds": stats["n_total"],
         "n_sifted": stats["n_sifted"],
         # QBER on the whole sifted key, with its Wilson CI
@@ -89,15 +88,15 @@ def run_one(emission_fidelity: float, protocol: str) -> dict:
     }
 
 
-def job_key(protocol, emission_fidelity):
-    return (protocol, round(float(emission_fidelity), 6))
+def job_key(protocol, emission_fidelity, distance_km):
+    return (protocol, round(float(emission_fidelity), 6), round(float(distance_km), 6))
 
 
 def load_done() -> set:
     if not os.path.exists(OUT_CSV):
         return set()
     df = pd.read_csv(OUT_CSV)
-    return {job_key(r.protocol, r.emission_fidelity) for r in df.itertuples()}
+    return {job_key(r.protocol, r.emission_fidelity, r.distance_km) for r in df.itertuples()}
 
 
 def append_row(row: dict):
@@ -108,16 +107,16 @@ if __name__ == "__main__":
     # DM formalism is switched on only inside run_oracle_diagnostic and restored afterwards.
     ns.set_qstate_formalism(ns.QFormalism.KET)
 
-    jobs = [(p, f) for f in EMISSION_FIDELITIES for p in PROTOCOLS]
+    jobs = [(p, f, d) for f in EMISSION_FIDELITIES for p in PROTOCOLS for d in DISTANCE_KM]
     done = load_done()
     todo = [j for j in jobs if job_key(*j) not in done]
     print(f"{len(jobs)} runs in total, {len(jobs) - len(todo)} already in {OUT_CSV}, {len(todo)} to do "
-          f"({NUM_ROUNDS} rounds each, {DISTANCE_KM:g} km)")
+          f"({NUM_ROUNDS} rounds each")
 
-    for i, (protocol, f) in enumerate(todo, 1):
-        print(f"[{i}/{len(todo)}] {protocol:5s} emission_fidelity = {f:.2f}", flush=True)
+    for i, (protocol, f, d) in enumerate(todo, 1):
+        print(f"[{i}/{len(todo)}] {protocol:5s} emission_fidelity = {f:.2f}, distance = {d:.1f}", flush=True)
         t0 = time.time()
-        row = run_one(f, protocol)
+        row = run_one(d, f, protocol)
         append_row(row)
         tp = row["throughput_bps"]
         print(f"    delivered fidelity = {row['fidelity']:.4f}   QBER = {row['qber'] * 100:.2f}%   "
