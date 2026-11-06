@@ -543,6 +543,51 @@ def qber_by_key_pair(alice_result, bob_result, config: ProtocolConfig, expected_
                 counts[pair][1] += 1
     return {p: wilson_interval(m, n) for p, (n, m) in counts.items() if n > 0}
 
+SYM_COLS = ["qber_z", "qber_z_ci_low", "qber_z_ci_high",
+            "qber_x", "qber_x_ci_low", "qber_x_ci_high",
+            "qber_diff", "qber_diff_ci_low", "qber_diff_ci_high",
+            "key_fraction", "key_fraction_low"]
+
+
+def h2(p):
+    p = numpy.clip(p, 1e-12, 1 - 1e-12)
+    return float(-p * numpy.log2(p) - (1 - p) * numpy.log2(1 - p))
+
+
+def key_pair_counts(alice_result, bob_result, config: ProtocolConfig, expected_relation):
+    """{pair: [n_rounds, n_mismatches]} per ogni coppia di basi chiave."""
+    counts = {pair: [0, 0] for pair in config.key_pairs}
+    for ar, br in zip(alice_result, bob_result):
+        pair = (ar["basis"], br["basis"])
+        if pair in counts and pair in expected_relation:
+            counts[pair][0] += 1
+            if not expected_equal(ar["outcome"], br["outcome"], expected_relation[pair]):
+                counts[pair][1] += 1
+    return counts
+
+
+def symmetry_check(counts, z: float = 1.96):
+    """Solo BBM92: (0,0) = base Z, (1,1) = base X.
+    Restituisce Q_Z, Q_X, la loro differenza con CI al 95% e il tasso di chiave
+    asintotico 1 - h2(Q_Z) - h2(Q_X) (punto e stima conservativa con i limiti
+    superiori delle CI; se <= 0 non c'e' chiave)."""
+    (nz, mz), (nx, mx) = counts[(0, 0)], counts[(1, 1)]
+    if nz == 0 or nx == 0:
+        return dict.fromkeys(SYM_COLS)
+    qz, zlo, zhi = wilson_interval(mz, nz)
+    qx, xlo, xhi = wilson_interval(mx, nx)
+    # errore standard della differenza con la correzione di Agresti-Caffo (+1/+1)
+    pz, px = (mz + 1) / (nz + 2), (mx + 1) / (nx + 2)
+    se = float(numpy.sqrt(pz * (1 - pz) / (nz + 2) + px * (1 - px) / (nx + 2)))
+    diff = qx - qz
+    return {
+        "qber_z": qz, "qber_z_ci_low": zlo, "qber_z_ci_high": zhi,
+        "qber_x": qx, "qber_x_ci_low": xlo, "qber_x_ci_high": xhi,
+        "qber_diff": diff, "qber_diff_ci_low": diff - z * se, "qber_diff_ci_high": diff + z * se,
+        "key_fraction": 1 - h2(qz) - h2(qx),
+        "key_fraction_low": 1 - h2(min(zhi, 0.5)) - h2(min(xhi, 0.5)),
+    }
+
 
 # ============================================================
 # V2.5 - RAW KEY EXTRACTION PIPELINE
@@ -692,6 +737,12 @@ def run_full_pipeline(cfg: StackNetworkConfig, config: ProtocolConfig, label: st
 
     print(f"Total rounds:       {stats['n_total']}")
     print(f"Sifted key length:  {stats['n_sifted']} ({stats['sifted_rate']*100:.1f}% of rounds)")
+    if config.name == "bbm92":
+        sym = symmetry_check(key_pair_counts(alice_result, bob_result, config, expected_relation))
+        print(f"Q_X - Q_Z = {sym['qber_diff']*100:+.2f}% "
+              f"(95% CI: [{sym['qber_diff_ci_low']*100:+.2f}%, {sym['qber_diff_ci_high']*100:+.2f}%])")
+        print(f"Key fraction 1-h(Q_Z)-h(Q_X): {sym['key_fraction']:.4f} "
+              f"(conservativa: {sym['key_fraction_low']:.4f})")
     if config.has_bell_test:
         print(f"CHSH test rounds:   {stats['n_test']}")
     print(f"Discarded rounds:   {stats['n_discarded']}")
